@@ -1,0 +1,93 @@
+@Repository
+public interface ProductRepository extends JpaRepository<Product, Integer> {
+
+	@Query(value = "select pr from Product pr where pr.name = ?1", nativeQuery = false)
+	List<Product> getProductsExactByName(String nazevProduktu);
+
+	@Query(value = "select pr from Product pr", nativeQuery = false)
+	List<Product> getAllProducts();
+	
+	@Query(value = "select * from product where r_volume is null", nativeQuery = true)
+	List<Product> getAllProductsWhereRVolumeIsNull();
+	
+	@Query(value = "select distinct product.id, product.name, product.volume, product.volume_unit, product.matched_with from product\r\n" + 
+			"\r\n" + 
+			"join availability on availability.product_id = product.id\r\n" + 
+			"\r\n" + 
+			"where availability.availability in (1)", nativeQuery = true)
+	List<Object[]> getAllAvailableProducts();
+	
+	@Query(value = "select distinct product.id, product.name, product.volume, product.volume_unit, product.matched_with from product\n" + 
+			"join availability on availability.product_id = product.id\n" + 
+			"where availability.availability in (1) and product.source not in (1) or product.source is null", nativeQuery = true)
+	List<Object[]> getAllAvailableNonBrandBankProducts();
+	
+	@Query(value = "select * from product \n" + 
+			"join availability on availability.product_id = product.id\n" + 
+			"where availability.availability in (1) and product.matched_with is null", nativeQuery = true)
+	List<Product> getAllAvailableProductsWhereMatchedWithNull();
+	
+	@Query(value = "SELECT * FROM product WHERE matched_with IS NULL", nativeQuery = true)
+	List<Product> getAllProductsWhereMatchedWithIsNull();
+	
+	@Query(value = "SELECT * FROM product WHERE source = 1 and matched_with IS NULL", nativeQuery = true)
+	List<Product> getOnlyBBProducts();
+	
+	@Query(value = "SELECT * FROM product WHERE source not in (1) or source is NULL", nativeQuery = true)
+	List<Product> getOnlyNONBBProducts();
+	
+	@Query(value = "SELECT * FROM product WHERE init_amount_unit IS NULL", nativeQuery = true)
+	List<Product> getAllProductsWhereInitAmountUnitIsNull();
+
+	@Query(value = "select count(distinct product.id) from product", nativeQuery = true)
+	int countProductsInDatabase();
+
+	@Query(value = "select pr from Product pr where pr.id in ?1", nativeQuery = false)
+	List<Product> getAllProductsById(List<Integer> listProducts);
+
+	@Query(value = "select pr from Product pr where pr.id = ?1", nativeQuery = false)
+	Product getProductById(Integer productID);
+
+	@Query(value = "select pr from Product pr where pr.name like %?1% ", nativeQuery = false)
+	List<Product> getAllProductsContainingString(String text);
+
+	@Query(value = " select * from "
+			+ "(select pg.id as id, pg.name as name, null as brandId, 1 as unitId, init_volume as volume, init_volume_unit as volumeUnit, 2 as typ from product_group pg where pg.name COLLATE 'utf8_general_ci' like %?1% ORDER BY pg.name) as a "
+			+ "UNION ALL "
+			+ "select * from "
+			+ "(select p.id as id, p.name as name, p.brand_id as brandId, p.unit_id as unitId, p.volume as volume, p.volume_unit as volumeUnit, 1 as typ from product p where p.name COLLATE 'utf8_general_ci' like %?1% ORDER BY p.name) as b "
+			+ "limit ?2", nativeQuery = true)
+	List<Object[]> getTopFiveProductsContainingString(String text, int count);
+	
+	
+	@Query(value = " select * from "  
+			+ "(select pg.id as id, pg.name as name, null as brandId, 1 as unitId, init_volume as volume, init_volume_unit as volumeUnit, 2 as typ from product_group pg where pg.name COLLATE 'utf8_general_ci' like %?1% ORDER BY pg.name) as a "
+			+ "UNION ALL "
+			+ "select * from "
+			+ "(select p.id as id, p.name as name, p.brand_id as brandId, p.unit_id as unitId, p.volume as volume, p.volume_unit as volumeUnit, 1 as typ from product p where p.name COLLATE 'utf8_general_ci' like %?1% ORDER BY p.name) as b "
+			, nativeQuery = true)
+	List<Object[]> getTopFiveProductsContainingString(String text);
+	
+	@Query(value = "select pr.volumeUnit from Product pr where pr.id = ?1", nativeQuery = false)
+	Integer getUnitProduct(int idProduct);
+
+	@Query(value = "SELECT id FROM product" + "WHERE (name LIKE %banán %) "
+			+ "AND name NOT LIKE %diana% AND name NOT LIKE %fresh&cool% AND name NOT LIKE %fresh & cool% AND name NOT LIKE %nutrend% AND name NOT LIKE %mixit% AND  name NOT LIKE %ella's kitchen% AND name NOT LIKE %hipp% AND name NOT LIKE %směs% AND name NOT LIKE %příkrm% AND name NOT LIKE %kapsička% AND name NOT LIKE %freche freunde% AND name NOT LIKE %přesnídávka% AND name NOT LIKE %plantain%", nativeQuery = true)
+	List<Integer> bananaGroup();
+
+
+	/**
+	 *  vytvoření nákupního lístku podle idProdukt se zadanými idShops
+	 * @param idproducts
+	 * @param idshops
+	 * */
+	@Query(value = "select product.id as productId, product.name as nameProduct, product.volume as volume, product.volume_unit as volumeUnitId, price_shop.shop_id as shopId, price.price as price "
+			+ " from product " + " join price ON price.product_id = product.id "
+			+ " join price_shop ON	price_shop.price_id = price.id "
+			+ " join availability ON	availability.product_id = product.id " + " where price.valid_to is NULL AND "
+			+ " product.id in ?1 AND " + " price_shop.shop_id in ?2 AND "
+			+ " price_shop.shop_id = availability.shop_id AND " + " availability.availability = 1 "
+			+ " order by price ", nativeQuery = true)
+	List<Object[]> createShoppingListFromProductsWithShops(List<Integer> idproducts, List<Integer> idshops);
+
+}
