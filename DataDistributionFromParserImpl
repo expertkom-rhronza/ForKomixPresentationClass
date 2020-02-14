@@ -1,0 +1,318 @@
+package cz.expertkom.ju.common;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+import javax.annotation.PostConstruct;
+import javax.transaction.Transactional;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import cz.expertkom.ju.interfaces.BrandService;
+import cz.expertkom.ju.interfaces.CommonService;
+import cz.expertkom.ju.interfaces.DataDistributionFromParsers;
+import cz.expertkom.ju.interfaces.ProductComponent;
+import cz.expertkom.ju.interfaces.ProductService;
+import cz.expertkom.ju.interfaces.ShopService;
+import cz.expertkom.ju.interfaces.VolumeReaderInterface;
+import cz.expertkom.ju.interfaces.entity.Availability;
+import cz.expertkom.ju.interfaces.entity.Price;
+import cz.expertkom.ju.interfaces.entity.Price2;
+import cz.expertkom.ju.interfaces.entity.PriceAtShop;
+import cz.expertkom.ju.interfaces.entity.Product;
+import cz.expertkom.ju.interfaces.repository.AvailabilityRepository;
+import cz.expertkom.ju.interfaces.repository.Price2Repository;
+import cz.expertkom.ju.interfaces.repository.PriceAtShopRepository;
+import cz.expertkom.ju.interfaces.repository.ProductRepository;
+import cz.expertkom.ju.interfaces.repository.ShopRepository;
+import cz.expertkom.ju.interfaces.repository.UlozeniDoSqlInterface;
+import cz.expertkom.ju.interfaces.repository.UrlEntityNoRelationsRepository;
+import cz.expertkom.ju.interfaces.repository.UrlRepository;
+import cz.expertkom.ju.interfaces.singleobjects.NameProductIdBrand;
+import lombok.extern.log4j.Log4j2;
+
+/**https://github.com/expertkom-rhronza/ForKomixPresentationClass
+ * Účelem třídy je zvolit postup ukládání dat do databáze na základě základě zjištěného stavu.
+ * Z parseru se do metody runDistribution() předávají data získaná parsováním.
+  */
+
+@Service
+@Log4j2
+public class DataDistributionFromParserImpl implements DataDistributionFromParsers {
+
+    @Autowired
+    private ProductService pService;
+
+    @Autowired
+    private ProductComponent pComponent;
+
+    @Autowired
+    private UlozeniDoSqlInterface uSql;
+
+    @Autowired
+    private ShopService shopService;
+
+    @Autowired
+    private CommonService commServ;
+
+    @Autowired
+    private BrandService brandServ;
+
+    @Autowired
+    private ProductRepository prdRep;
+
+    @Autowired
+    private AvailabilityRepository avlRep;
+
+    @Autowired
+    private Price2Repository prc2Rep;
+
+    @Autowired
+    private PriceAtShopRepository prcAtShopRep;
+
+    @Autowired
+    private ShopRepository shopRep;
+
+    @Autowired
+    private UrlRepository urlRepo;
+
+    @Autowired
+    private UrlEntityNoRelationsRepository urlEntityNoRelationsRepository;
+
+    @Autowired
+    private VolumeReaderInterface reader;
+
+    private static final int RATEPARITY = 100;
+    private static final float FLOAT_PRECISION = 0.001f;
+    private static final int PERIOD_ONE_DAY = 24 * 60 * 60 * 1000; // 24 hodin * 60 minut * 60 vteřin * 1000 milisekund
+
+    // definice listu, který představuje tabulku product
+    private List<Product> listProduct = new ArrayList<>();
+
+    @PostConstruct
+    private void init() {
+        // inicalizace listu hodnotami z tabulky Produkt
+        listProduct = pService.getAllproducts();
+    }
+
+    @Override
+    /**
+     * Spouští a procesuje distribuci dat
+     * @param urlAddress
+     * @param nameProduct
+     * @param volume
+     * @param volumeUnit
+     * @param price
+     * @param availability
+     * @param validateFrom
+     * @param validateTo
+     * @param unit - vždy ks !!
+     * @param brand
+     * @param shop
+     * @param phone
+     * @param gpsLongitude
+     * @param gpsLatitude
+     * @param address
+     * @param vendor
+     * @param imgUrl
+     * 	 *
+     */
+    public void runDistribution(String urlAddress, String nameProduct, float volume, String volumeUnit, float price, int availability, Date validateFrom, Date validateTo, String unit /* prodejní unit "ks" */, String brand, int shop,
+                                String phone, Float gpsLongitude, Float gpsLatitude, String address, String vendor, String imgUrl) {
+
+        log.info("");
+        log.info("+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+        log.info("| DataDistribution start. NameProduct(před finalizací)=" + nameProduct + ", url=" + urlAddress + ", volume=" + volume + ", volumeUnit(před finalizací)=" + volumeUnit + " ,price=" + price);
+        log.info("+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+        log.info("imgUrl=" + imgUrl);
+        log.info("shop=" + shop);
+
+        // úprava názvu produktu, velikosti a jednotky balení:
+        Product productFinal = new Product(nameProduct, 0, commServ.getIdFromVolumeUnit("ks"), volume, commServ.getIdFromVolumeUnit(volumeUnit.trim()));
+        productFinal = reader.repairDistributionProductVolume(productFinal);
+        pComponent.finalProductProcessing(productFinal);
+
+        // odstranění názvu výrobce z názvu produktu a zjištění brand produktu:
+        NameProductIdBrand npib = brandServ.clearBrandFromProduct(productFinal.getName());
+        productFinal.setName(npib.getNameProductWithoutBrand());
+
+        log.info("PP po finalizaci a de-brandizaci:" + productFinal.toString());
+
+        int idProduct = -1;
+
+        // Je asociace (URL + shop +volume + volumUnit) již uložena ?
+        idProduct = pService.getIdComparerProductFromURL(shop, urlAddress, productFinal.getVolume(), productFinal.getVolumeUnit());
+        log.info(((idProduct > -1) ? "Produkt je v již databázi: " + idProduct : "Nový produkt")  );
+
+        if (idProduct > -1) {
+
+            // update date_parser_processed url
+            urlRepo.updateDateParserProcessedInUrl(urlAddress, shop, idProduct);
+
+            // AKTUALIZACE CENY ZNÁMÉHO PRODUKTU
+            updateProduct(idProduct, shop, price, availability, validateFrom, validateTo);
+
+            // AKTUALIZACE ODKAZU NA OBRÁZEK
+            List<Integer> urlIdList = new ArrayList<>(); /* seznam id tabulky url */
+            try {
+                urlIdList = urlEntityNoRelationsRepository.getUrlIdFromIdProductAndUrl(idProduct, urlAddress, shop);
+            } catch (Exception e) {
+                log.error("getUrlIdFromIdProductAndUrl: " + e.getMessage());
+            }
+            if (urlIdList != null && urlIdList.size() > 0) {
+                urlEntityNoRelationsRepository.updateImgUrl(urlIdList, imgUrl);
+            } else {
+                log.error("urlEntityNoRelationsRepository.getUrlIdFromIdProductAndUrl: není možno nalézt id v tabulce Url pro idProduct=" + idProduct + ", urlAddress=" + urlAddress + ", shop=" + shop);
+            }
+
+        } else {
+            try {
+                // Je možné asociovat s již známým produktem ?
+                idProduct = pService.getIdProductFromMaxParityNameVolumeVolumeunit(listProduct, productFinal.getName(), productFinal.getVolume(), productFinal.getVolumeUnit(), RATEPARITY);
+                log.info("Je možné asociovat s již známým produktem ?" + ((idProduct > -1) ? "ANO:" + idProduct : "NE "));
+                if (idProduct > -1) {
+                    log.info("Nová URL k existujícícmu produktu, id=" + idProduct + ", URL=" + urlAddress);
+                    // UKLÁDÁNÍ NOVÉ VARIANTY PRODUKTU
+                    uSql.addProductFromNewShop(idProduct, price, validateFrom, validateTo, availability, urlAddress, shop, imgUrl);
+                } else {
+                    log.info("Zcela nový produkt: URL=" + urlAddress + "urlAddress=" + " idShop=" + shop + " název=" + nameProduct + " availability=" + availability);
+                    // UKLÁDÁNÍ NOVÉHO PRODUKTU
+                    log.info("Jmeno po finalizaci " + productFinal.getName());
+                    ProductDistribution productDistribution = new ProductDistribution(productFinal.getName(), npib.getIdBrand(), commServ.getIdFromVolumeUnit(unit)/* unit a volumeUnit mají stejný číselník */, productFinal.getVolume(),
+                            productFinal.getVolumeUnit(), price, validateFrom, validateTo, shopService.getNameShopFromId(shop), phone, gpsLongitude, gpsLatitude, address, vendor, urlAddress, availability, imgUrl);
+                    uSql.addNewProduct(productDistribution);
+                    // nové načtení seznamu produktů
+                    listProduct = pService.getAllproducts();
+                }
+            } catch (Exception e) {
+                log.error("---------------------------------------------------------------------------------------------------------------------------------------------------------", e);
+                log.error("Výjimka v getIdComparerProductMaxParityNameVolumeVolumeunit:", e.getMessage() + ", " + e.getLocalizedMessage());
+                log.error("---------------------------------------------------------------------------------------------------------------------------------------------------------", e);
+                return;
+            }
+        }
+        log.info("+------------------------------+");
+        log.info("|   DataDistribution finish    |");
+        log.info("+------------------------------+");
+        log.info("");
+    }
+
+    /**
+     *  updatuje cenu a availability zvoleného produktu ve zvoleném shopu; v případě že nalezene ve zvolenéné shopu více cen, tak je změní vsechny
+     * (dosud chybně předpokládáme, že v shopu se může vyskytovat jen jedna varianta produktu) Používá alternativní Entitu Price2, která má správný getter getId() na rozdíl od
+     * Price, který vrací null a má jednodušší mapování
+     *
+     * @param idProduct
+     * @param priceNewValue
+     * @param availabilityNewValue
+     * @param validityFrom
+     * @param validityTo
+     *
+     */
+    @Transactional
+    public void updateProduct(Integer idProduct, int shop, float priceNewValue, int availabilityNewValue, Date validityFrom, Date validityTo) {
+        log.info("updateProduct start...");
+        log.info("idProduct=" + idProduct + ", shop=" + shop + ", priceNewValue=" + priceNewValue + ", availabilityNewValue=" + availabilityNewValue + ", validityFrom=" + validityFrom + ", validityTo=" + validityTo);
+
+        // aktualizace ceny pro zvolený prudukt a shop
+        List<Price2> prices = prc2Rep.findAllProductPricesForShop(idProduct, shop);
+        if (prices != null && prices.size() > 0) {
+            for (Price2 currentPrice : prices) {
+                if (Math.abs(currentPrice.getPrice() - priceNewValue) > FLOAT_PRECISION) {
+
+                    closePriceToYesterday(currentPrice);
+                    Price2 newPrice = createNewPrice(idProduct, priceNewValue);
+                    creteNewPriceAtShop(idProduct, shop, priceNewValue, newPrice);
+
+                }
+            }
+        } else {
+            log.info("updateProduct: Nenelezena CENA(CENY) pro zvolený produkt a shop k ukončení. Bude se jen zakládat nová cena (idproduktu=" + idProduct + ", shop=" + shop + ", priceValue=" + priceNewValue + ", availability="
+                    + availabilityNewValue + ", validityFrom=" + validityFrom + ", validityTo=" + validityTo + ")");
+
+            Price2 newPrice = createNewPrice(idProduct, priceNewValue);
+            creteNewPriceAtShop(idProduct, shop, priceNewValue, newPrice);
+        }
+
+        updateAvailability(idProduct, shop, priceNewValue, availabilityNewValue);
+
+        log.info("updateProduct konec.");
+    }
+	/**
+	 *  aktualizace availability
+	 * @param idProduct
+	 * @param shop
+	 * @param priceNewValue
+	 * @param availabilityNewValue
+	 */
+    private void updateAvailability(Integer idProduct, int shop, float priceNewValue, int availabilityNewValue) {
+        // aktualizace availabiloity pro zadaný produkt a shop
+        List<Availability> avList = avlRep.getAvailabilitiesForProductAndShop(idProduct, shop);
+        if (avList != null && avList.size() > 0) {
+            for (Availability availability : avList) {
+                availability.setAvailability(availabilityNewValue);
+                avlRep.save(availability);
+            }
+        } else {
+            log.error("");
+            log.error("Nenelezena DOSTUPNOST(I) pro zvolený produkt a shop !");
+            log.error("updateProduct(idproduktu=" + idProduct + ", shop=" + shop + ", priceValue=" + priceNewValue + ", availability=" + availabilityNewValue + ")");
+            log.error("");
+        }
+    }
+
+    /**
+     * vytváří nový záznam v priceAtShop - cena produktu v obchodě
+     *
+     * @param idProduct
+     * @param shop
+     * @param priceNewValue nová cena
+     * @param newPrice      -
+     */
+    private void creteNewPriceAtShop(Integer idProduct, int shop, float priceNewValue, Price2 newPrice) {
+        Product product = new Product();
+        try {
+            product = prdRep.findOne(idProduct);
+            Price priceForPriceAtShop = new Price(product, priceNewValue);
+            priceForPriceAtShop.setId(newPrice.getId());
+            PriceAtShop priceAtShop = new PriceAtShop(null, priceForPriceAtShop, shopRep.findOne(Integer.valueOf(shop)));
+            prcAtShopRep.save(priceAtShop);
+        } catch (Exception e) {
+            log.error("Došlo k výjimce založení nové ceny v \"price_shop\" . " + e.getMessage());
+        }
+    }
+
+    /**
+     * vytváří novou cenu
+     * @param idProduct     : id produktu
+     * @param priceNewValue : nová cena
+     */
+    private Price2 createNewPrice(Integer idProduct, float priceNewValue) {
+        Price2 newPrice = new Price2(null, idProduct, priceNewValue, new Date(), null);
+        try {
+            newPrice = prc2Rep.save(newPrice);
+        } catch (Exception e) {
+            log.error("Došlo k výjimce při založení nové ceny v tabulce \"price\". " + e.getMessage());
+        }
+        return newPrice;
+    }
+
+    /**
+     * ukončuje cenu zadaného produktu včerejším datumem
+     *
+     * @param currentPrice
+     */
+    private void closePriceToYesterday(Price2 currentPrice) {
+        /* ukončení ceny */
+        try {
+            Price2 price = prc2Rep.findOne(currentPrice.getId());
+            price.setValidityTo(new Date(new Date().getTime() - PERIOD_ONE_DAY));
+            prc2Rep.save(price);
+        } catch (Exception e) {
+            log.error("Došlo k výjimce při nastavení ukončení platnosti ceny. " + e.getMessage());
+        }
+    }
+
+}
